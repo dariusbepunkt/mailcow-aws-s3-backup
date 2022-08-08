@@ -1,20 +1,5 @@
 #!/bin/bash
 
-###############################
-#                             #
-#     Mailcow Borg Backup     #
-#                             #
-###############################
-# Author:       Matthis B.    #
-# Created:      20201105      #
-# Lastchange:   20201119      #
-###############################
-# Changelog:                  #
-# - 20201105: init            #
-# - 20201107: small changes   #
-# - 20201119: bug fixes       #
-###############################
-
 ##
 ## Cronjob:
 ## 7 4 * * * /home/path/to/backup.sh > /home/path/to/backup/log/mailcow_sys_$(date +\%Y-\%m-\%d-\%H-\%M-\%S).log 2>&1
@@ -34,19 +19,9 @@ trap "echo $( getDate ) Backup interrupted >&2; exit 2" INT TERM
 
 # System vars
 workDirectory='/opt/mailcow-dockerized'		# path to docker-compose.yml
-
 logDirectory='/home/path/to/backup/log'		# path top log archive (keep in mind to change path in cron also)
 logKeepAmount='10'							# how many logfiles should be kept
 
-
-# Borg env vars
-BORG_PREFIX='mx10'
-
-export BORG_REPO='ssh://borguser@123.123.123.123:22/repo/path'
-export BORG_PASSPHRASE='passw0rd'
-
-export BORG_UNKNOWN_UNENCRYPTED_REPO_ACCESS_IS_OK=yes
-export BORG_RELOCATED_REPO_ACCESS_IS_OK=yes
 
 
 # autocatch vars
@@ -86,6 +61,11 @@ if [[ ! -d "${logDirectory}" ]] ; then
   fi
 fi
 
+if [[ ! -f "${workDirectory}/.env.aws" ]] ; then
+    echo "ERROR: AWS Environment Variables not found. Copy .env.aws.dist to ${workDirectory}/.env.aws and adust it to your needs"
+    exit 1
+fi
+export $(grep -v '^#' .env.aws | xargs)
 
 
 #
@@ -108,7 +88,7 @@ if (( "$countLogs" > "$logKeepAmount" )) ; then
 fi
 
 echo
-echo "-- pre borg stuff"
+echo "-- pre backup stuff"
 
 # ensure no more changes are made (e.g. send/receive mails, WebUI changes)
 echo "--- mailcow: stop services"
@@ -173,7 +153,7 @@ fi
 # BackupProcess
 #
 
-# starting borg
+# starting aws sync
 echo
 echo "-- start syncing files"
 echo
@@ -181,35 +161,32 @@ echo
 thisDir="$( cd $( dirname ${BASH_SOURCE[0]} ) >/dev/null 2>&1 && pwd )"
 thisFile="$(basename ${0})"
 
-borg create															\
-  --show-rc															\
-  --verbose															\
-  --stats															\
-  --compression lz4													\
-  --exclude-caches													\
-  ::"${BORG_PREFIX}-{now:%Y-%m-%d_%H:%M:%S}"						\
-  "${workDirectory}/.env"											\
-  "${workDirectory}/docker-compose.yml"								\
-  "${workDirectory}/mailcow.conf"									\
-  "${volumeVMail}"													\
-  "${volumeCrypt}"													\
-  "${volumeRedis}"													\
-  "${volumeRSpamd}"													\
-  "${volumePostfix}"												\
-  "${volumeMySQL}/tmp_backup"										\
-  "${thisDir}/${thisFile}"
+docker run --rm -it \
+  -v ${workDirectory}/.env:/aws${workDirectory}/.env \
+  -v ${workDirectory}/docker-compose.yml:/aws${workDirectory}/docker-compose.yml \
+  -v ${workDirectory}/docker-compose.override.yml:/aws${workDirectory}/docker-compose.override.yml \
+  -v ${workDirectory}/.nonexitentTest:/aws${workDirectory}/.nonexitentTest \
+  -v ${workDirectory}/mailcow.conf:/aws${workDirectory}/mailcow.conf \
+  -v ${volumeVMail}:/aws${volumeVMail} \
+  -v ${volumeCrypt}:/aws${volumeVvolumeCryptMail} \
+  -v ${volumeRedis}:/aws${volumeRedis} \
+  -v ${volumeRSpamd}:/aws${volumeRSpamd} \
+  -v ${volumePostfix}:/aws${volumePostfix} \
+  -v ${volumeMySQL}/tmp_backup:/aws${volumeMySQL}/tmp_backup \
+  -v ${thisDir}/${thisFile}:/aws${thisDir}/${thisFile} \
+  -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_S3_BUCKET amazon/aws-cli s3 sync --delete . s3://$AWS_S3_BUCKET
 
-borg_create_exit=$?
+docker_exit=$?
 
 # check state
 echo
-echo "-- borg finished"
-if [[ "${borg_create_exit}" == "0" ]] ; then
+echo "-- sync finished"
+if [[ "${docker_exit}" == "0" ]] ; then
   echo "--- success"
-elif [[ "${borg_create_exit}" == "1" ]] ; then
+elif [[ "${docker_exit}" == "1" ]] ; then
   echo "--- WARN: 1"
 else
-  echo "--- FAILED: ${borg_create_exit}"
+  echo "--- FAILED: ${docker_exit}"
 fi
 
 
@@ -219,7 +196,7 @@ fi
 #
 
 echo
-echo "-- post borg stuff"
+echo "-- post backup stuff"
 
 echo "--- mailcow: re/start services"
 echo "---- start dovecot"
@@ -265,4 +242,4 @@ echo
 echo "-- backup duration: $(printf '%02d hours %02d minutes %02d seconds' $((duration / 3600)) $(((duration / 60) % 60)) $((duration % 60)))"
 info "-> everything done: exit"
 
-exit ${borg_create_exit}
+exit ${docker_exit}
